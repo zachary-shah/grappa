@@ -1,0 +1,14 @@
+.ignore
+
+__pycache__/
+
+*play.ipynb
+
+*.egg-info
+
+# deploy
+dist/
+.vscode
+
+tests/data/im_3d_*
+tests/pyeyes

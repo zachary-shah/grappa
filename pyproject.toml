@@ -1,0 +1,47 @@
+[build-system]
+requires = [
+   "setuptools",
+   "wheel",
+   "build",
+   "setuptools_scm"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch_grappa"
+dynamic = ["version"]
+
+authors = [
+  { name="Zachary Shah", email="zshah9@stanford.edu" },
+]
+description = "Implementation of GRAPPA in PyTorch for fast MRI reconstruction."
+readme = "README.md"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "torch",
+    "jaxtyping"
+]
+
+[project.urls]
+Homepage = "https://github.com/zachary-shah/torch_grappa"
+Repository = "https://github.com/zachary-shah/torch_grappa"
+"Bug Tracker" = "https://github.com/zachary-shah/torch_grappa/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit",
+    "black",
+]
+
+[tool.setuptools]
+packages = ["torch_grappa"]
+package-dir = {"" = "src"}
+
+[tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
