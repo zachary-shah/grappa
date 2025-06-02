@@ -1,11 +1,12 @@
-from typing import Tuple, Optional
-from jaxtyping import Float
 from math import floor
-from tqdm import tqdm
+from typing import Optional, Tuple
 
 import torch
+from jaxtyping import Float
+from tqdm import tqdm
 
-from .utils import sympad, undo_sympad, grappa_index, matrix_batch_size
+from .utils import grappa_index, matrix_batch_size, sympad, undo_sympad
+
 
 def grappa(
     data: torch.Tensor,
@@ -31,7 +32,7 @@ def grappa(
         Calibration data used for GRAPPA reconstruction.
         Should be cropped to calibration region.
     R : Tuple[int, ...]
-        Acceleration factor for each spatial dimension. 
+        Acceleration factor for each spatial dimension.
         At least dimension must be fully sampled (R=1) for this implementation.
     kernel_size : Tuple[int, ...]
         Size of the GRAPPA kernel for each spatial dimension.
@@ -50,7 +51,9 @@ def grappa(
     """
 
     ndim = len(kernel_size)
-    assert len(R) == ndim, "R must be a tuple of integers matching the number of spatial dimensions."
+    assert (
+        len(R) == ndim
+    ), "R must be a tuple of integers matching the number of spatial dimensions."
     R = tuple([int(r) for r in R])
 
     fs_inds = torch.where(torch.tensor(R) == 1)[0]
@@ -70,8 +73,9 @@ def grappa(
         batched = True
         n_batch_dims = data.ndim - (ndim + 1)
         batch_shape = data.shape[:n_batch_dims]
-        assert calib.shape[:n_batch_dims] == batch_shape, \
-            "If batching input, calibration data must have the same leading dimensions."
+        assert (
+            calib.shape[:n_batch_dims] == batch_shape
+        ), "If batching input, calibration data must have the same leading dimensions."
         data = data.reshape(-1, *data.shape[n_batch_dims:])
         calib = calib.reshape(-1, *calib.shape[n_batch_dims:])
     else:
@@ -84,11 +88,11 @@ def grappa(
         fs_dim = fs_inds[0].item()
         data = data.moveaxis(fs_dim + 2, 2)
         calib = calib.moveaxis(fs_dim + 2, 2)
-        R = tuple([1] + list(R[:fs_dim]) + list(R[fs_dim + 1:]))
+        R = tuple([1] + list(R[:fs_dim]) + list(R[fs_dim + 1 :]))
         kernel_size = tuple(
-            list(kernel_size[fs_dim:fs_dim+1]) + \
-            list(kernel_size[:fs_dim]) + \
-            list(kernel_size[fs_dim + 1:]) \
+            list(kernel_size[fs_dim : fs_dim + 1])
+            + list(kernel_size[:fs_dim])
+            + list(kernel_size[fs_dim + 1 :])
         )
 
     if ndim == 2:
@@ -106,7 +110,7 @@ def grappa(
     # Restore user dimensions
     if ndim == 2:
         out = out[..., 0]
-    
+
     if input_fs_unordered:
         out = out.moveaxis(2, fs_dim + 2)
 
@@ -114,17 +118,17 @@ def grappa(
         out = out.reshape(*batch_shape, *out.shape[1:])
     else:
         out = out[0]
-    
+
     return out
 
-    
+
 def _grappa(
     data: Float[torch.Tensor, "C Nx Ny Nz"],
     calib: Float[torch.Tensor, "C cx cy cz"],
     kernel_size: Tuple[int, int, int],
     R: Tuple[int, int, int],
-    lamda_tik: float = 0.0, # TODO: currently unused
-    ) -> Float[torch.Tensor, "C Nx Ny Nz"]:
+    lamda_tik: float = 0.0,  # TODO: currently unused
+) -> Float[torch.Tensor, "C Nx Ny Nz"]:
     """
     Core grappa algorithm with processed inputs.
 
@@ -137,7 +141,7 @@ def _grappa(
     calib : Float[torch.Tensor, "C cx cy cz"]
         Calibration data used for GRAPPA reconstruction.
         Should be cropped to calibration region.
-    
+
     Returns
     -------
     Float[torch.Tensor, "C Nx Ny Nz"]
@@ -169,13 +173,14 @@ def _grappa(
 
         # Solve for GRAPPA weights via least squares
         weights = torch.linalg.lstsq(
-            calib[src].T, calib[tgt].T,
+            calib[src].T,
+            calib[tgt].T,
         ).solution  # shape: (C * prod(kernel_size), C)
 
         # TODO: fix problem with inds taking too much memory (don't store for all coils?)
         # Extract source and target indices from undersampled data mask
         src, tgt = grappa_index(kernel_size, mask, pad, R, kidx)
-        
+
         # Determine optimal batch size given remaining memory
         batch_size = matrix_batch_size(
             weights.shape[1],
@@ -188,7 +193,11 @@ def _grappa(
         # Apply GRAPPA weights to data
         if batch_size is not None and batch_size < src.shape[1]:
             Npoints = src.shape[1]
-            for i in tqdm(range(0, Npoints, batch_size), desc=f"Processing kernel {kidx + 1}/{R[1] * R[2] - 1}", leave=False):
+            for i in tqdm(
+                range(0, Npoints, batch_size),
+                desc=f"Processing kernel {kidx + 1}/{R[1] * R[2] - 1}",
+                leave=False,
+            ):
                 batch_slc = slice(i, min(i + batch_size, Npoints))
                 data[tgt[:, batch_slc]] = weights.T @ data[src[:, batch_slc]]
         else:
