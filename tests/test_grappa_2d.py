@@ -17,6 +17,7 @@ kernel_size = (3, 2)
 device = 1
 N = 100  # repetitions for timing
 lamda_tik = 1e-6  # Tikhonov regularization parameter
+autocal = True  # Test automatic detection of calibration region from input data
 
 
 def cc(x):
@@ -34,10 +35,19 @@ calib = y[:, (Nx - ncal) // 2 : (Nx + ncal) // 2, (Ny - ncal) // 2 : (Ny + ncal)
 inp = y.clone() * 0
 inp[:, :: R[0], :: R[1]] = y[:, :: R[0], :: R[1]]
 
+if autocal:
+    inp[:, (Nx - ncal) // 2 : (Nx + ncal) // 2, (Ny - ncal) // 2 : (Ny + ncal) // 2] = (
+        calib
+    )
+
 ts = perf_counter()
 
 for _ in range(N):
-    out = grappa(inp, calib, R, kernel_size, lamda_tik=lamda_tik)
+    if autocal:
+        out = grappa(inp, R, kernel_size, lamda_tik=lamda_tik)
+    else:
+        out = grappa(inp, R, kernel_size, calib=calib, lamda_tik=lamda_tik)
+
 
 te = perf_counter() - ts
 

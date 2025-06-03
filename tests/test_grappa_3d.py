@@ -1,4 +1,3 @@
-from math import prod, sqrt
 from time import perf_counter
 
 import torch
@@ -12,21 +11,17 @@ from torch_grappa.utils import fft, ifft
 
 # Parameters
 device = torch.device(0)  # GPU device to use
-R = (1, 3, 1)
-kernel_size = (5, 4, 1)
-Ncal = 25  # center region width for calib
+R = (1, 3, 2)
+kernel_size = (5, 4, 2)
+Ncal = (25, 25, 25)  # center region width for calib
 noise_std = 1e-4
-dataset = "brain"  # head or brain
+dataset = "head"  # head or brain
 lamda_tik = 1e-6  # Tikhonov regularization parameter
 
 if dataset == "head":
-    data_path = (
-        "/local_mount/space/mayday/data/users/zachs/grappa/tests/data/im_3d_head.pt"
-    )
+    data_path = "data/im_3d_head.pt"
 elif dataset == "brain":
-    data_path = (
-        "/local_mount/space/mayday/data/users/zachs/grappa/tests/data/im_3d_brain.pt"
-    )
+    data_path = "data/im_3d_brain.pt"
 else:
     raise ValueError("Unknown dataset. Use 'head' or 'brain'.")
 
@@ -40,30 +35,36 @@ im_size = img.shape
 # create sampling mask
 samp_mask = grappa_mask(im_size, R).to(device)
 
-# Simulate acquisition
+"""
+Simulate acquisition
+"""
 x = img[None,] * mps
 y = fft(x, im_size)
 y = y + torch.randn_like(y) * noise_std
 
-calib_slice = tuple(
+calib_slc = [
+    slice(im_size[i] // 2 - Ncal[i] // 2, im_size[i] // 2 + Ncal[i] // 2 + 1)
+    for i in range(len(im_size))
+]
+calib_slc_full = tuple(
     [
         slice(
             None,
         )
     ]
-    + [
-        slice(im_size[i] // 2 - Ncal // 2, im_size[i] // 2 + Ncal // 2)
-        for i in range(len(im_size))
-    ]
+    + calib_slc
 )
-calib = y[calib_slice]
+calib_slc = tuple(calib_slc)
+calib = y[calib_slc_full]
 
+# Undersampling with calibration present
 y_us = y * samp_mask[None,]
+y_us[calib_slc_full] = calib
 
 tstart = perf_counter()
 print(f"Starting grappa with Rx={R[0]}, Ry={R[1]}, Rz={R[2]}.")
 
-y_grappa = grappa(y_us, calib, R, kernel_size, lamda_tik=lamda_tik)
+y_grappa = grappa(y_us, R, kernel_size, lamda_tik=lamda_tik)
 
 print(f"Grappa took {perf_counter() - tstart:.2f} seconds")
 
@@ -74,7 +75,7 @@ nrmse = (x_grappa - x).abs().norm() / x.abs().norm()
 print(f"NRMSE: {nrmse.item():.4f}")
 
 img_rec = x.abs().norm(dim=0)
-img_us = x_us.abs().norm(dim=0) * sqrt(prod(R))
+img_us = x_us.abs().norm(dim=0)  # * sqrt(prod(R))
 img_grappa = x_grappa.abs().norm(dim=0)
 
 # Visualization

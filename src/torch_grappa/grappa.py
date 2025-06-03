@@ -1,11 +1,12 @@
 import gc
 from math import floor, prod
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from jaxtyping import Float
 from tqdm import tqdm
 
+from .sampling import segment_calibration
 from .solve import solve_grappa_weights
 from .utils import (
     grappa_index,
@@ -18,9 +19,9 @@ from .utils import (
 
 def grappa(
     data: torch.Tensor,
-    calib: torch.Tensor,
     R: Tuple[int, ...],
     kernel_size: Tuple[int, ...],
+    calib: Optional[torch.Tensor] = None,
     lamda_tik: float = 0.0,
 ) -> torch.Tensor:
     """
@@ -34,17 +35,18 @@ def grappa(
     ----------
     data : Float[torch.Tensor, "... C *spatial"]
         Complex k-space data to be reconstructed.
-        Should not include calibration region.
+        Should not include calibration region if calib is provided.
         The leading dimensions (if any) are treated as batch dimensions.
-    calib : Float[torch.Tensor, "... C *calibspatial"]
-        Calibration data used for GRAPPA reconstruction.
-        Should be cropped to calibration region.
     R : Tuple[int, ...]
         Acceleration factor for each spatial dimension.
         At least dimension must be fully sampled (R=1) for this implementation.
     kernel_size : Tuple[int, ...]
         Size of the GRAPPA kernel for each spatial dimension.
         Must be odd in the fully sampled dimension and even in undersampled dimensions.
+    calib : Float[torch.Tensor, "... C *calibspatial"]
+        Calibration data used for GRAPPA reconstruction.
+        Should be cropped to calibration region.
+        If not provided, will try to auto-segment the calibration region from the data.
     lamda_tik : float, optional
         Regularization (tikonov) parameter for GRAPPA, if desired. Default 0.
 
@@ -68,9 +70,12 @@ def grappa(
         for i in range(ndim)
     ), "Kernel size must be odd in fully sampled dimensions and even in undersampled dimensions."
 
-    assert all(
-        kernel_size[-i] < calib.shape[-i] for i in range(1, ndim + 1)
-    ), "Calibration region must be larger than or equal to kernel size in all dimensions."
+    input_calib = False
+    if calib is not None:
+        input_calib = True
+        assert all(
+            kernel_size[-i] < calib.shape[-i] for i in range(1, ndim + 1)
+        ), "Calibration region must be larger than or equal to kernel size in all dimensions."
 
     # Prepare inputs
     batched = False
@@ -78,21 +83,24 @@ def grappa(
         batched = True
         n_batch_dims = data.ndim - (ndim + 1)
         batch_shape = data.shape[:n_batch_dims]
-        assert (
-            calib.shape[:n_batch_dims] == batch_shape
-        ), "If batching input, calibration data must have the same leading dimensions."
         data = data.reshape(-1, *data.shape[n_batch_dims:])
-        calib = calib.reshape(-1, *calib.shape[n_batch_dims:])
+        if input_calib:
+            assert (
+                calib.shape[:n_batch_dims] == batch_shape
+            ), "If batching input and providing calibration, calibration data must have the same leading dimensions."
+            calib = calib.reshape(-1, *calib.shape[n_batch_dims:])
     else:
         data = data[None,]
-        calib = calib[None,]
+        if input_calib:
+            calib = calib[None,]
 
     input_fs_unordered = False
     if R[0] > 1:
         input_fs_unordered = True
         fs_dim = fs_inds[0].item()
         data = data.moveaxis(fs_dim + 2, 2)
-        calib = calib.moveaxis(fs_dim + 2, 2)
+        if input_calib:
+            calib = calib.moveaxis(fs_dim + 2, 2)
         R = tuple([1] + list(R[:fs_dim]) + list(R[fs_dim + 1 :]))
         kernel_size = tuple(
             list(kernel_size[fs_dim : fs_dim + 1])
@@ -102,7 +110,8 @@ def grappa(
 
     if ndim == 2:
         data = data[..., None]
-        calib = calib[..., None]
+        if input_calib:
+            calib = calib[..., None]
         kernel_size = (kernel_size[0], kernel_size[1], 1)
         R = (R[0], R[1], 1)
 
@@ -110,7 +119,17 @@ def grappa(
     # TODO: properly integrate batching with batch size support.
     out = data.clone()
     for b in range(data.shape[0]):
-        out[b] = _grappa(data[b], calib[b], kernel_size, R, lamda_tik)
+
+        if not input_calib:
+            calib_, calib_slc = segment_calibration(data[b])
+        else:
+            calib_ = calib[b]
+
+        out[b] = _grappa(data[b], calib_, kernel_size, R, lamda_tik)
+
+        # Ensure consistenty with calib
+        if calib is None:
+            out[b][calib_slc] = calib_
 
     # Restore user dimensions
     if ndim == 2:
