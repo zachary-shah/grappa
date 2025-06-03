@@ -24,7 +24,8 @@ classifiers = [
 ]
 dependencies = [
     "torch",
-    "jaxtyping"
+    "jaxtyping",
+    "tqdm",
 ]
 
 [project.urls]
@@ -35,7 +36,6 @@ Repository = "https://github.com/zachary-shah/torch_grappa"
 [project.optional-dependencies]
 dev = [
     "pre-commit",
-    "black",
 ]
 
 [tool.setuptools]

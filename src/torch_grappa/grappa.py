@@ -1,11 +1,19 @@
-from math import floor
-from typing import Optional, Tuple
+import gc
+from math import floor, prod
+from typing import Tuple
 
 import torch
 from jaxtyping import Float
 from tqdm import tqdm
 
-from .utils import grappa_index, matrix_batch_size, sympad, undo_sympad
+from .solve import solve_grappa_weights
+from .utils import (
+    grappa_index,
+    index_batch_size,
+    index_expand_coils,
+    sympad,
+    undo_sympad,
+)
 
 
 def grappa(
@@ -37,11 +45,8 @@ def grappa(
     kernel_size : Tuple[int, ...]
         Size of the GRAPPA kernel for each spatial dimension.
         Must be odd in the fully sampled dimension and even in undersampled dimensions.
-    lamda : float, optional
+    lamda_tik : float, optional
         Regularization (tikonov) parameter for GRAPPA, if desired. Default 0.
-    batch_size : int, optional
-        Batch size for processing large data. If None, processes all data at once.
-        Useful for memory management with 3D / large kernels.
 
     Returns
     -------
@@ -127,7 +132,7 @@ def _grappa(
     calib: Float[torch.Tensor, "C cx cy cz"],
     kernel_size: Tuple[int, int, int],
     R: Tuple[int, int, int],
-    lamda_tik: float = 0.0,  # TODO: currently unused
+    lamda_tik: float = 0.0,
 ) -> Float[torch.Tensor, "C Nx Ny Nz"]:
     """
     Core grappa algorithm with processed inputs.
@@ -166,45 +171,39 @@ def _grappa(
     calib = calib.contiguous().view(-1)
 
     # Loop over kernels
-    for kidx in range(R[1] * R[2] - 1):
+    Nk = prod(R) - 1
+    for kidx in tqdm(range(Nk), desc="GRAPPA kernels", leave=False):
 
         # Extract source and target indices from calibration mask
-        src, tgt = grappa_index(kernel_size, calib_mask, pad, R, kidx)
+        src, tar = grappa_index(kernel_size, calib_mask, pad, R, kidx)
 
-        # Solve for GRAPPA weights via least squares
-        weights = torch.linalg.lstsq(
-            calib[src].T,
-            calib[tgt].T,
-        ).solution  # shape: (C * prod(kernel_size), C)
+        # Solve for GRAPPA weights with regularized least squares
+        weights = solve_grappa_weights(calib[src].T, calib[tar].T, lamda_tik=lamda_tik)
 
-        # TODO: fix problem with inds taking too much memory (don't store for all coils?)
         # Extract source and target indices from undersampled data mask
-        src, tgt = grappa_index(kernel_size, mask, pad, R, kidx)
-
-        # Determine optimal batch size given remaining memory
-        batch_size = matrix_batch_size(
-            weights.shape[1],
-            weights.shape[0],
-            src.shape[1],
-            dtype_bytes=data.element_size(),
-            device=data.device,
+        src_sc, tar_sc, coil_ofs = grappa_index(
+            kernel_size, mask, pad, R, kidx, return_single_coil=True
         )
 
-        # Apply GRAPPA weights to data
-        if batch_size is not None and batch_size < src.shape[1]:
-            Npoints = src.shape[1]
-            for i in tqdm(
-                range(0, Npoints, batch_size),
-                desc=f"Processing kernel {kidx + 1}/{R[1] * R[2] - 1}",
-                leave=False,
-            ):
-                batch_slc = slice(i, min(i + batch_size, Npoints))
-                data[tgt[:, batch_slc]] = weights.T @ data[src[:, batch_slc]]
-        else:
-            data[tgt] = weights.T @ data[src]
+        # Determine optimal batch size given remaining memory
+        batch_size = index_batch_size(src_sc, coil_ofs, data)
 
-        del src, tgt, weights
+        # Apply GRAPPA weights to data
+        if batch_size and (0 < batch_size < src_sc.shape[1]):
+            Npoints = src_sc.shape[1]
+            for i in range(0, Npoints, batch_size):
+                batch_slc = slice(i, min(i + batch_size, Npoints))
+                src_batch, tar_batch = index_expand_coils(
+                    src_sc[:, batch_slc], tar_sc[batch_slc], coil_ofs
+                )
+                data[tar_batch] = weights.T @ data[src_batch]
+        else:
+            src, tar = index_expand_coils(src_sc, tar_sc, coil_ofs)
+            data[tar] = weights.T @ data[src]
+
+        del src, tar, weights
         torch.cuda.empty_cache()
+        gc.collect()
 
     # reshape and unpad data
     data = data.view(*in_shape)

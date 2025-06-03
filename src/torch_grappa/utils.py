@@ -5,26 +5,6 @@ import torch
 from jaxtyping import Float
 
 
-def matrix_batch_size(
-    M: int, N: int, P: int, dtype_bytes: int = 8, device: torch.device = "cpu"
-) -> int:
-    """
-    Given a problem of solving Y = A @ B, where A is MxN, B is NxP, and Y is MxP,
-    compute some batch_size Pb <= P such that Y[:, :Pb = A @ B[:, :Pb] can be solved
-    with remaining memory.
-    """
-
-    if device == "cpu" or (not torch.cuda.is_available()):
-        return P  # no batching on CPU
-
-    size_avail = torch.cuda.mem_get_info(device)[0] // dtype_bytes - (M * N)
-    size_per_batch = M * 2 + N
-    if size_avail <= 0 or size_per_batch <= 0:
-        return 0
-
-    return size_avail // size_per_batch
-
-
 def fft_resize(input: torch.tensor, oshape: tuple):
     """Resize with zero-padding or cropping.
 
@@ -194,6 +174,7 @@ def grappa_index(
     pad: Tuple[int, int, int],
     R: Tuple[int, int, int],
     kernel_idx: int,
+    return_single_coil: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Get linearized indices for source and target data.
@@ -224,9 +205,9 @@ def grappa_index(
     ```
     data = torch.randn(Nc, Nx, Ny, Nz) # data array
     data_flat = data.contiguous().view(-1) # flattened row-major array
-    src, trg = grappa_index(kernel_size, samp, pad, R, kernel_idx)
+    src, tar = grappa_index(kernel_size, samp, pad, R, kernel_idx)
     src_data = data_flat[src] # (Nc*K, N_points)
-    trg_data = data_flat[trg] # (Nc, N_points)
+    tar_data = data_flat[tar] # (Nc, N_points)
     ```
 
     """
@@ -255,27 +236,85 @@ def grappa_index(
     ztyp = (kernel_idx + 1) // R[1]
     kernel_ofs = [0, ytyp, ztyp]
     k_tar = [R[i] * (ceil(kernel_size[i] / 2) - 1) + kernel_ofs[i] for i in range(3)]
-    k_trg = k_tar[2] + k_tar[1] * Nz + k_tar[0] * Nz * Ny
+    k_tar = k_tar[2] + k_tar[1] * Nz + k_tar[0] * Nz * Ny
 
     # 3) Subtract target from source to get relative to targets
-    k_src -= k_trg
+    k_src -= k_tar
 
     # 4) Find all possible target indices from first coil mask
     sub = undo_sympad(samp[0], pad)
     sub_shifted = torch.roll(sub, shifts=(0, ytyp, ztyp), dims=(0, 1, 2))
     sub_padded = sympad(sub_shifted, pad)
-    trg_crd = torch.nonzero(sub_padded, as_tuple=False).T
-    trg_single_coil = trg_crd[2] + trg_crd[1] * Nz + trg_crd[0] * Nz * Ny
+    tar_crd = torch.nonzero(sub_padded, as_tuple=False).T
+    tar_single_coil = tar_crd[2] + tar_crd[1] * Nz + tar_crd[0] * Nz * Ny
 
     # 5) Create source indices relative to target indices
-    src_single_coil = trg_single_coil[None,] + k_src[:, None]
+    src_single_coil = tar_single_coil[None,] + k_src[:, None]
 
     # 6) Replictate for all coils
     coil_ofs = torch.arange(Nc, device=device, dtype=torch.long) * Nx * Ny * Nz
-    trg = coil_ofs[:, None] + trg_single_coil[None, :]  # (Nc, Npix)
-    src = coil_ofs[:, None, None] + src_single_coil[None, :, :]  # (Nc, K, Npix)
 
-    # Flatten to (Nc * prod(kernel_size), Npix)
+    if return_single_coil:
+        # For memory efficiency
+        return src_single_coil, tar_single_coil, coil_ofs
+    else:
+        return index_expand_coils(src_single_coil, tar_single_coil, coil_ofs)
+
+
+def index_expand_coils(
+    src_single: torch.LongTensor,
+    tar_single: torch.LongTensor,
+    coil_ofs: torch.LongTensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Epxand source and target indices to include coil offsets.
+    """
+
+    tar = coil_ofs[:, None] + tar_single[None, :]
+
+    # Flatten coil / kernel dimension together
+    src = coil_ofs[:, None, None] + src_single[None, :, :]
     src = src.view(-1, src.shape[-1])
 
-    return src.long(), trg.long()
+    return src, tar
+
+
+def index_batch_size(
+    src_single: torch.LongTensor,
+    coil_ofs: torch.LongTensor,
+    data: torch.Tensor,
+) -> int:
+    """
+    Determine batch size for applying GRAPPA given remaining memory.
+
+    Required memory:
+
+    Source inds: Nsrc * P * idx_bytes
+    Target inds: Ntar * P * idx_bytes
+
+    Src data: Nsrc * P * data_bytes
+    Target data: Ntar * P * data_bytes
+
+    Returns int batch size, or None if no batching is possible.
+    """
+
+    device = data.device
+    if not torch.cuda.is_available() or device == "cpu":
+        return None
+
+    idx_bytes = src_single.element_size()
+    data_bytes = data.element_size()
+    total_bytes = idx_bytes + data_bytes
+
+    Ntar = coil_ofs.shape[0]
+    Nsrc = src_single.shape[0] * Ntar
+
+    size_avail = torch.cuda.mem_get_info(device)[0]
+    size_single = (Nsrc + Ntar * 2) * total_bytes
+    if size_avail <= 0 or size_single <= 0:
+        print("No memory available for batching.")
+        return None
+
+    batch_size = size_avail // size_single
+
+    return batch_size

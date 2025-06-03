@@ -12,11 +12,12 @@ from torch_grappa.utils import fft, ifft
 
 # Parameters
 device = torch.device(0)  # GPU device to use
-R = (1, 2, 2)
-kernel_size = (5, 4, 4)
+R = (1, 3, 1)
+kernel_size = (5, 4, 1)
 Ncal = 25  # center region width for calib
 noise_std = 1e-4
-dataset = "head"  # head or brain
+dataset = "brain"  # head or brain
+lamda_tik = 1e-6  # Tikhonov regularization parameter
 
 if dataset == "head":
     data_path = (
@@ -62,7 +63,7 @@ y_us = y * samp_mask[None,]
 tstart = perf_counter()
 print(f"Starting grappa with Rx={R[0]}, Ry={R[1]}, Rz={R[2]}.")
 
-y_grappa = grappa(y_us, calib, R, kernel_size)
+y_grappa = grappa(y_us, calib, R, kernel_size, lamda_tik=lamda_tik)
 
 print(f"Grappa took {perf_counter() - tstart:.2f} seconds")
 
