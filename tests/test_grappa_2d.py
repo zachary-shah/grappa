@@ -60,8 +60,6 @@ nrmse = (xhat - x).norm() / x.norm()
 
 print(f"NRMSE = {nrmse.item():.4f}")
 
-quit()
-
 fig, ax = plt.subplots(1, 3, figsize=(15, 5))
 
 ax[0].imshow(cc(x).cpu().numpy(), cmap="gray")
