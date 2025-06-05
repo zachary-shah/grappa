@@ -11,4 +11,6 @@ dist/
 .vscode
 
 tests/data/im_3d_*
+tests/data/epti_2d.pt
 tests/pyeyes
+tests/profs

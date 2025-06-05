@@ -4,8 +4,33 @@ from typing import Tuple
 import torch
 from jaxtyping import Float
 
+# Grappa experiences slowdowns in indexing for large batch sizes.
+MAX_BATCH_SIZE = 2**18
 
-def fft_resize(input: torch.tensor, oshape: tuple):
+
+def batch_iterator(total: int, batch_size: int):
+    """
+    Iterator for batch processing
+
+    Parameters:
+    -----------
+    total : int
+        total number of elements
+    batch_size : int
+        batch size
+
+    Returns:
+    --------
+    list object
+        list of slices over batch dimension
+    """
+    assert total > 0, f"batch_iterator called with {total} elements"
+    delim = list(range(0, total, batch_size)) + [total]
+    endpoints = zip(delim[:-1], delim[1:])
+    return [slice(start, end) for start, end in endpoints]
+
+
+def fft_resize(input: torch.Tensor, oshape: tuple):
     """Resize with zero-padding or cropping.
 
     Args:
@@ -289,17 +314,17 @@ def index_batch_size(
 
     Required memory:
 
-    Source inds: Nsrc * P * idx_bytes
-    Target inds: Ntar * P * idx_bytes
+    Source inds: B * Nsrc * P * idx_bytes
+    Target inds: B * Ntar * P * idx_bytes
 
-    Src data: Nsrc * P * data_bytes
-    Target data: Ntar * P * data_bytes
+    Src data: B * Nsrc * P * data_bytes
+    Target data: B * Ntar * P * data_bytes
 
     Returns int batch size, or None if no batching is possible.
     """
 
     device = data.device
-    if not torch.cuda.is_available() or device == "cpu":
+    if not torch.cuda.is_available() or device == torch.device("cpu"):
         return None
 
     idx_bytes = src_single.element_size()
@@ -308,13 +333,16 @@ def index_batch_size(
 
     Ntar = coil_ofs.shape[0]
     Nsrc = src_single.shape[0] * Ntar
+    B = data.shape[0]
 
     size_avail = torch.cuda.mem_get_info(device)[0]
-    size_single = (Nsrc + Ntar * 2) * total_bytes
+    size_single = (Nsrc + Ntar * 2) * total_bytes * B
     if size_avail <= 0 or size_single <= 0:
         print("No memory available for batching.")
         return None
 
     batch_size = size_avail // size_single
+
+    batch_size = min(batch_size, MAX_BATCH_SIZE)
 
     return batch_size

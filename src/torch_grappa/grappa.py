@@ -1,23 +1,20 @@
-import gc
 from math import floor, prod
 from typing import Optional, Tuple
 
 import torch
-from jaxtyping import Float
+from jaxtyping import Complex
 from tqdm import tqdm
 
 from .sampling import segment_calibration
 from .solve import solve_grappa_weights
 from .utils import (
+    batch_iterator,
     grappa_index,
     index_batch_size,
     index_expand_coils,
     sympad,
     undo_sympad,
 )
-
-# Grappa experiences slowdowns in indexing for large batch sizes.
-MAX_BATCH_SIZE = 2**18
 
 
 def grappa(
@@ -26,13 +23,16 @@ def grappa(
     kernel_size: Tuple[int, ...],
     calib: Optional[torch.Tensor] = None,
     lamda_tik: float = 0.0,
+    batch_size: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Simple 2D/3D GRAPPA algorithm for reconstructing undersampled k-space data.
 
-    Requires:
+    Requirements:
     - 1 fully sampled dimension
     - Kernels with odd size in the fully sampled dimension(s), and even otherwise
+    - If batching, the sampling pattern should be the same across batches.
+    - TODO: shared calibration option, where all items in batch use shared weights.
 
     Parameters
     ----------
@@ -52,6 +52,10 @@ def grappa(
         If not provided, will try to auto-segment the calibration region from the data.
     lamda_tik : float, optional
         Regularization (tikonov) parameter for GRAPPA, if desired. Default 0.
+    batch_size : Optional[int], optional
+        Batch size across leading dimensions of data.
+        For parallelizing across many small GRAPPA problems, can result in 2x speedup.
+        If None, will parallelize over all batches at once.
 
     Returns
     -------
@@ -118,25 +122,37 @@ def grappa(
         kernel_size = (kernel_size[0], kernel_size[1], 1)
         R = (R[0], R[1], 1)
 
+    # get calib region if needed
+    if not input_calib:
+        calib_slc = segment_calibration(data.abs().sum(dim=0))[1]
+
+    B = data.shape[0]
+    if batch_size is not None:
+        batch_size = max(min(batch_size, B), 1)
+    else:
+        batch_size = B
+
     # Core call
-    # TODO: properly integrate batching with batch size support.
     out = data.clone()
-    for b in tqdm(
-        range(data.shape[0]), desc="GRAPPA batches", leave=False, disable=not batched
+    for bslc in tqdm(
+        batch_iterator(B, batch_size),
+        desc="GRAPPA batches",
+        leave=False,
+        disable=not batched,
     ):
 
         if not input_calib:
-            calib_, calib_slc = segment_calibration(data[b])
+            calib_batch = data[(bslc,) + calib_slc].clone()
         else:
-            calib_ = calib[b]
+            calib_batch = calib[bslc]
 
-        out[b] = _grappa(
-            data[b], calib_, kernel_size, R, lamda_tik, verbose=not batched
+        out[bslc] = _grappa(
+            data[bslc], calib_batch, kernel_size, R, lamda_tik, verbose=not batched
         )
 
         # Ensure consistenty with calib
-        if calib is None:
-            out[b][calib_slc] = calib_
+        if not input_calib:
+            out[(bslc,) + calib_slc] = calib_batch
 
     # Restore user dimensions
     if ndim == 2:
@@ -154,30 +170,29 @@ def grappa(
 
 
 def _grappa(
-    data: Float[torch.Tensor, "C Nx Ny Nz"],
-    calib: Float[torch.Tensor, "C cx cy cz"],
+    data: Complex[torch.Tensor, "B C Nx Ny Nz"],
+    calib: Complex[torch.Tensor, "B C cx cy cz"],
     kernel_size: Tuple[int, int, int],
     R: Tuple[int, int, int],
     lamda_tik: float = 0.0,
     verbose: bool = True,
-) -> Float[torch.Tensor, "C Nx Ny Nz"]:
+) -> Complex[torch.Tensor, "B C Nx Ny Nz"]:
     """
     Core grappa algorithm with processed inputs.
 
     Parameters
     ----------
-    data : Float[torch.Tensor, "C Nx Ny Nz"]
+    data : Float[torch.Tensor, "B C Nx Ny Nz"]
         Complex k-space data to be reconstructed.
-        Should not include calibration region.
         Nx should be fully sampled.
-    calib : Float[torch.Tensor, "C cx cy cz"]
+    calib : Float[torch.Tensor, "B C cx cy cz"]
         Calibration data used for GRAPPA reconstruction.
         Should be cropped to calibration region.
 
     Returns
     -------
-    Float[torch.Tensor, "C Nx Ny Nz"]
-        Reconstructed k-space data of shape (C, Nx, Ny, Nz).
+    Float[torch.Tensor, "B C Nx Ny Nz"]
+        Reconstructed k-space data of shape (B, C, Nx, Ny, Nz).
         Complex tensor.
     """
 
@@ -187,15 +202,15 @@ def _grappa(
 
     # Pad data
     data = sympad(data, pad)
-    mask = data.abs() > 0
+    mask = data.abs().sum(dim=0) > 0
 
     # Flatten data for indexing
-    in_shape = data.shape
-    data = data.contiguous().view(-1)
+    B, in_shape = data.shape[0], data.shape[1:]
+    data = data.contiguous().view(B, -1)
 
     # Flatten calibration data
-    calib_mask = torch.ones_like(calib, dtype=torch.bool)
-    calib = calib.contiguous().view(-1)
+    calib_mask = torch.ones_like(calib[0], dtype=torch.bool)
+    calib = calib.contiguous().view(B, -1)
 
     # Loop over kernels
     Nk = prod(R) - 1
@@ -204,8 +219,10 @@ def _grappa(
         # Extract source and target indices from calibration mask
         src, tar = grappa_index(kernel_size, calib_mask, pad, R, kidx)
 
-        # Solve for GRAPPA weights with regularized least squares
-        weights = solve_grappa_weights(calib[src].T, calib[tar].T, lamda_tik=lamda_tik)
+        # Solve for GRAPPA weights with regularized least squares: (B, C*K, C)
+        weights = solve_grappa_weights(
+            calib[:, src].mT, calib[:, tar].mT, lamda_tik=lamda_tik
+        )
 
         # Extract source and target indices from undersampled data mask
         src_sc, tar_sc, coil_ofs = grappa_index(
@@ -214,7 +231,6 @@ def _grappa(
 
         # Determine optimal batch size given remaining memory
         batch_size = index_batch_size(src_sc, coil_ofs, data)
-        batch_size = min(batch_size, MAX_BATCH_SIZE)
 
         # Apply GRAPPA weights to data
         if batch_size and (0 < batch_size < src_sc.shape[1]):
@@ -224,16 +240,16 @@ def _grappa(
                 src_batch, tar_batch = index_expand_coils(
                     src_sc[:, batch_slc], tar_sc[batch_slc], coil_ofs
                 )
-                data[tar_batch] = weights.T @ data[src_batch]
+                data[:, tar_batch] = weights.mT @ data[:, src_batch]
         else:
             src, tar = index_expand_coils(src_sc, tar_sc, coil_ofs)
-            data[tar] = weights.T @ data[src]
+            data[:, tar] = weights.mT @ data[:, src]
 
         del src, tar, weights
         torch.cuda.empty_cache()
 
     # reshape and unpad data
-    data = data.view(*in_shape)
+    data = data.view(B, *in_shape)
     data = undo_sympad(data, pad)
 
     return data

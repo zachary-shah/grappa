@@ -6,11 +6,12 @@ import torch
 from pyeyes import ComparativeViewer as cv
 
 from torch_grappa.grappa import grappa
+from torch_grappa.profiler import profile_decorator
 from torch_grappa.sampling import grappa_mask
 from torch_grappa.utils import fft, ifft
 
 # Parameters
-device = torch.device(0)  # GPU device to use
+device = torch.device(5)  # GPU device to use
 R = (1, 3, 2)
 kernel_size = (5, 4, 2)
 Ncal = (25, 25, 25)  # center region width for calib
@@ -25,7 +26,9 @@ elif dataset == "brain":
 else:
     raise ValueError("Unknown dataset. Use 'head' or 'brain'.")
 
-data = torch.load(data_path, map_location=device, weights_only=True)
+data = torch.load(
+    data_path, weights_only=True, map_location=device if device.type != "cpu" else None
+)
 img = data["img"]
 mps = data["mps"]  # Multi-coil sensitivity maps
 # mask = data["mask"]  # brain mask
@@ -61,12 +64,20 @@ calib = y[calib_slc_full]
 y_us = y * samp_mask[None,]
 y_us[calib_slc_full] = calib
 
+
+@profile_decorator(enable=True, verbose=True, save=True, save_path="./profs/3d_grappa")
+def profile_loop(N=10):
+    for _ in range(N):
+        y_grappa = grappa(y_us, R, kernel_size, lamda_tik=lamda_tik)
+    return y_grappa
+
+
+N = 10
 tstart = perf_counter()
 print(f"Starting grappa with Rx={R[0]}, Ry={R[1]}, Rz={R[2]}.")
+y_grappa = profile_loop(N)
 
-y_grappa = grappa(y_us, R, kernel_size, lamda_tik=lamda_tik)
-
-print(f"Grappa took {perf_counter() - tstart:.2f} seconds")
+print(f"Grappa took {(perf_counter() - tstart)/N:.2f} seconds")
 
 x_us = ifft(y_us, im_size)
 x_grappa = ifft(y_grappa, im_size)

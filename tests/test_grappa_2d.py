@@ -3,7 +3,6 @@ from time import perf_counter
 import matplotlib
 import matplotlib.pyplot as plt
 import torch
-from scipy.io import loadmat
 
 from torch_grappa.grappa import grappa
 from torch_grappa.utils import fft, ifft
@@ -11,11 +10,11 @@ from torch_grappa.utils import fft, ifft
 matplotlib.use("webagg")
 
 # Parameters
-R = (1, 2)
+R = (1, 3)
 ncal = 24
-kernel_size = (3, 2)
-device = 1
-N = 100  # repetitions for timing
+kernel_size = (5, 2)
+device = 3
+N = 25  # repetitions for timing
 lamda_tik = 1e-6  # Tikhonov regularization parameter
 autocal = True  # Test automatic detection of calibration region from input data
 
@@ -52,6 +51,7 @@ for _ in range(N):
 te = perf_counter() - ts
 
 print(f"GRAPPA took {te/N:.4f} seconds")
+print(f"Total time for {N} runs: {te:.2f} seconds")
 
 xhat = ifft(out, im_size)
 xalias = ifft(inp, im_size)
@@ -59,6 +59,8 @@ xalias = ifft(inp, im_size)
 nrmse = (xhat - x).norm() / x.norm()
 
 print(f"NRMSE = {nrmse.item():.4f}")
+
+quit()
 
 fig, ax = plt.subplots(1, 3, figsize=(15, 5))
 
