@@ -58,7 +58,7 @@ def segment_calibration(data: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor,
 
     # Check that data is fully sampled in selected cal region
     def is_fs(css, ces):
-        return samp[get_slcs(css, ces)].all().item()
+        return samp[get_slcs(css, ces)].all()
 
     # intiial guess of calibration region as 3x3x3 center region
     css = [im_size[i] // 2 - 1 for i in range(ndim)]

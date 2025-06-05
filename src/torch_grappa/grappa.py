@@ -16,6 +16,9 @@ from .utils import (
     undo_sympad,
 )
 
+# Grappa experiences slowdowns in indexing for large batch sizes.
+MAX_BATCH_SIZE = 2**18
+
 
 def grappa(
     data: torch.Tensor,
@@ -118,14 +121,18 @@ def grappa(
     # Core call
     # TODO: properly integrate batching with batch size support.
     out = data.clone()
-    for b in range(data.shape[0]):
+    for b in tqdm(
+        range(data.shape[0]), desc="GRAPPA batches", leave=False, disable=not batched
+    ):
 
         if not input_calib:
             calib_, calib_slc = segment_calibration(data[b])
         else:
             calib_ = calib[b]
 
-        out[b] = _grappa(data[b], calib_, kernel_size, R, lamda_tik)
+        out[b] = _grappa(
+            data[b], calib_, kernel_size, R, lamda_tik, verbose=not batched
+        )
 
         # Ensure consistenty with calib
         if calib is None:
@@ -152,6 +159,7 @@ def _grappa(
     kernel_size: Tuple[int, int, int],
     R: Tuple[int, int, int],
     lamda_tik: float = 0.0,
+    verbose: bool = True,
 ) -> Float[torch.Tensor, "C Nx Ny Nz"]:
     """
     Core grappa algorithm with processed inputs.
@@ -191,7 +199,7 @@ def _grappa(
 
     # Loop over kernels
     Nk = prod(R) - 1
-    for kidx in tqdm(range(Nk), desc="GRAPPA kernels", leave=False):
+    for kidx in tqdm(range(Nk), desc="GRAPPA kernel", leave=False, disable=not verbose):
 
         # Extract source and target indices from calibration mask
         src, tar = grappa_index(kernel_size, calib_mask, pad, R, kidx)
@@ -206,6 +214,7 @@ def _grappa(
 
         # Determine optimal batch size given remaining memory
         batch_size = index_batch_size(src_sc, coil_ofs, data)
+        batch_size = min(batch_size, MAX_BATCH_SIZE)
 
         # Apply GRAPPA weights to data
         if batch_size and (0 < batch_size < src_sc.shape[1]):
@@ -222,7 +231,6 @@ def _grappa(
 
         del src, tar, weights
         torch.cuda.empty_cache()
-        gc.collect()
 
     # reshape and unpad data
     data = data.view(*in_shape)

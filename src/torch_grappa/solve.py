@@ -1,5 +1,3 @@
-import gc
-
 import torch
 
 
@@ -39,16 +37,50 @@ def solve_grappa_weights(
         # regularize
         if lamda_tik > 0:
             # normalize regularization scale by eigenvalues of A
-            max_eig = torch.max(torch.linalg.eigvalsh(AHA)).item()
+            max_eig = power_method(AHA.abs(), tol=1e-6, max_iter=10)[0].item()
+
             AHA += torch.eye(src.shape[1], device=src.device) * lamda_tik * max_eig
 
         weights = torch.linalg.lstsq(AHA, AHb).solution
-
-        del AHA, AHb
-        torch.cuda.empty_cache()
-        gc.collect()
 
     else:
         weights = torch.linalg.lstsq(src, tar).solution
 
     return weights
+
+
+def power_method(
+    A: torch.Tensor, tol: float = 1e-6, max_iter: int = 10
+) -> torch.Tensor:
+    """
+    Compute the largest eigenvalue and corresponding eigenvector of a matrix A
+    using the power method.
+
+    Parameters
+    ----------
+    A : torch.Tensor
+        Input matrix of shape (N, N).
+    tol : float, optional
+        Tolerance for convergence. Default is 1e-6.
+    max_iter : int, optional
+        Maximum number of iterations. Default is 10.
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        A tuple containing the largest eigenvalue and the corresponding eigenvector.
+        The eigenvalue is a scalar, and the eigenvector is a tensor of shape (N,).
+    """
+
+    evec = torch.randn(A.shape, device=A.device, dtype=A.dtype)
+    eig_last = 0
+
+    for i in range(max_iter):
+        evec = A @ evec
+        eig = evec.norm()
+        evec /= eig
+        if (eig - eig_last).abs() < tol * eig_last:
+            break
+        eig_last = eig
+
+    return eig, evec
